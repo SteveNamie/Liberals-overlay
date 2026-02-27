@@ -1,64 +1,171 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Live Walk Overlay</title>
-
-<style>
-body {
-  margin: 0;
-  background: transparent;
-  overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  color: white;
-}
-
-/* ===== Position Bottom Center ===== */
-.overlay {
-  position: absolute;
-  bottom: 3%;
-  left: 50%;
-  transform: translateX(-50%);
-  text-align: center;
-}
-
-/* ===== Location Line (Thin + Clean) ===== */
-.location {
-  font-size: 3vh;      /* smaller */
-  font-weight: 300;    /* thinner */
-  letter-spacing: 1px;
-  text-shadow: 0 2px 6px rgba(0,0,0,0.6);
-}
-
-/* ===== Temp + Time ===== */
-.details {
-  margin-top: 0.3vh;
-  font-size: 2vh;      /* smaller */
-  font-weight: 300;    /* thin */
-  opacity: 0.9;
-  text-shadow: 0 2px 6px rgba(0,0,0,0.6);
-}
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Walk Overlay</title>
+  <style>
+    body{
+      margin:0;
+      background:transparent;
+      overflow:hidden;
+      font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+      color:#fff;
+    }
+    .overlay{
+      position:fixed;
+      right:4vw;
+      bottom:4vh;
+      text-align:right;
+      pointer-events:none; /* so it won’t block taps */
+    }
+    .place{
+      font-size:2.4vh;
+      font-weight:400;      /* thinner */
+      letter-spacing:2px;
+      text-transform:uppercase;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+    }
+    .meta{
+      margin-top:.25vh;
+      font-size:1.6vh;
+      font-weight:300;      /* thinner */
+      opacity:.9;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+    }
+  </style>
 </head>
-
 <body>
+  <div class="overlay">
+    <div class="place" id="place">Locating…</div>
+    <div class="meta" id="meta">--°F • --:--:--</div>
+  </div>
 
-<div class="overlay">
-  <div class="location">Decatur, Alabama</div>
-  <div class="details" id="info">Loading...</div>
-</div>
+  <script>
+    // --- CONFIG ---
+    const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
+    const WEATHER_REFRESH_MS = 300000; // 5 min
+    const GEO_REFRESH_MS = 60000;      // 1 min (updates neighborhood as you move)
 
-<script>
-function updateTime() {
-  const now = new Date();
-  const time = now.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit', second:'2-digit'});
-  document.getElementById("info").innerHTML = "57°F • " + time;
-}
+    let lastTempF = "--";
+    let lastCoords = null;
 
-setInterval(updateTime, 1000);
-updateTime();
-</script>
+    function setText(id, txt){ document.getElementById(id).textContent = txt; }
 
+    function formatTime(){
+      return new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+    }
+
+    function updateMeta(){
+      setText("meta", `${lastTempF}°F • ${formatTime()}`);
+    }
+    setInterval(updateMeta, 1000);
+
+    function pickBestPlace(addr){
+      // Try to show neighborhood/suburb first, then city/state/country
+      const neighborhood = addr.neighbourhood || addr.neighborhood;
+      const suburb = addr.suburb;
+      const city = addr.city || addr.town || addr.village || addr.hamlet;
+      const state = addr.state || addr.region;
+      const country = addr.country;
+
+      const local = neighborhood || suburb || city || state || country || "Your Location";
+      const second = city && city !== local ? city : (state && state !== local ? state : "");
+      const third = state && state !== local && state !== second ? state : "";
+
+      // Build something like: "Chelsea, New York" or "Brooklyn, New York" or "Decatur, Alabama"
+      const parts = [];
+      parts.push(local);
+      if (second) parts.push(second);
+      else if (city && local !== city) parts.push(city);
+
+      // Prefer state if we have a city/local
+      if (state && !parts.includes(state) && (city || neighborhood || suburb)) parts.push(state);
+
+      // Keep it short: max 2 parts usually looks best
+      return parts.slice(0, 2).join(", ");
+    }
+
+    async function reverseGeocode(lat, lon){
+      // OpenStreetMap Nominatim (no key). Works on HTTPS pages.
+      // Note: respect their usage (don’t spam). We only call when location updates.
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+      const res = await fetch(url, {
+        headers: {
+          // Some hosts like a UA / referer; browsers may not allow custom UA,
+          // but this header is fine in most cases.
+          "Accept": "application/json"
+        }
+      });
+      if (!res.ok) throw new Error("geocode failed");
+      const data = await res.json();
+      const addr = data.address || {};
+      return pickBestPlace(addr);
+    }
+
+    async function fetchWeather(lat, lon){
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("weather failed");
+      const data = await res.json();
+      const t = Math.round(data.current_weather?.temperature);
+      if (Number.isFinite(t)) lastTempF = t;
+      updateMeta();
+    }
+
+    async function refreshAll(lat, lon){
+      // Only reverse-geocode if moved a bit (or first run) so we don’t hammer it
+      const movedEnough = !lastCoords
+        || Math.abs(lat - lastCoords.lat) > 0.002
+        || Math.abs(lon - lastCoords.lon) > 0.002;
+
+      lastCoords = {lat, lon};
+
+      // weather every time
+      fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; updateMeta(); });
+
+      // place sometimes
+      if (movedEnough){
+        reverseGeocode(lat, lon)
+          .then(place => setText("place", place))
+          .catch(() => setText("place", "Location"));
+      }
+    }
+
+    function startGeolocation(){
+      if (!navigator.geolocation){
+        setText("place", "No GPS");
+        return;
+      }
+
+      const onPos = (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        refreshAll(lat, lon);
+      };
+
+      const onErr = (err) => {
+        setText("place", "Enable Location");
+        // keep showing time, temp stays "--"
+      };
+
+      // Get initial position fast
+      navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
+
+      // Keep updating as you move
+      setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
+    }
+
+    // Kick off
+    updateMeta();
+    startGeolocation();
+
+    // Also refresh weather periodically even if you aren’t moving
+    setInterval(() => {
+      if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
+    }, WEATHER_REFRESH_MS);
+  </script>
 </body>
 </html>
