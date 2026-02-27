@@ -1,161 +1,64 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Live Walk Overlay</title>
-  <style>
-    :root{
-      --bg: rgba(120,120,120,.75);
-      --fg: rgba(255,255,255,.95);
-      --fg2: rgba(255,255,255,.85);
-      --shadow: 0 10px 30px rgba(0,0,0,.25);
-      --radius: 26px;
-    }
-    html,body{height:100%; width:100%; margin:0; background:transparent; overflow:hidden;}
-    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Live Walk Overlay</title>
 
-    /* overlay positioned bottom-left by default */
-    .wrap{
-      position:fixed;
-      left:24px;
-      bottom:24px;
-      pointer-events:none;
-    }
+<style>
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  color: white;
+}
 
-    .card{
-      display:inline-block;
-      padding:18px 22px;
-      border-radius:var(--radius);
-      background:var(--bg);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      box-shadow:var(--shadow);
-      min-width: 260px;
-    }
+/* ===== Position Bottom Center ===== */
+.overlay {
+  position: absolute;
+  bottom: 3%;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+}
 
-    .loc{
-      font-size:34px;
-      font-weight:800;
-      letter-spacing:.2px;
-      color:var(--fg);
-      line-height:1.05;
-      margin:0 0 10px 0;
-      white-space:nowrap;
-      overflow:hidden;
-      text-overflow:ellipsis;
-      max-width: 820px;
-    }
+/* ===== Location Line (Thin + Clean) ===== */
+.location {
+  font-size: 3vh;      /* smaller */
+  font-weight: 300;    /* thinner */
+  letter-spacing: 1px;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.6);
+}
 
-    .meta{
-      font-size:26px;
-      font-weight:600;
-      color:var(--fg2);
-      display:flex;
-      gap:12px;
-      align-items:baseline;
-      white-space:nowrap;
-    }
-
-    .dot{opacity:.85}
-  </style>
+/* ===== Temp + Time ===== */
+.details {
+  margin-top: 0.3vh;
+  font-size: 2vh;      /* smaller */
+  font-weight: 300;    /* thin */
+  opacity: 0.9;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.6);
+}
+</style>
 </head>
+
 <body>
-  <div class="wrap">
-    <div class="card">
-      <div id="location" class="loc">Locating…</div>
-      <div class="meta">
-        <span id="temp">--°F</span>
-        <span class="dot">•</span>
-        <span id="time">--:--:--</span>
-      </div>
-    </div>
-  </div>
 
-  <script>
-    // ===== Time (with seconds)
-    function updateTime(){
-      const now = new Date();
-      const t = now.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-      document.getElementById("time").textContent = t;
-    }
-    setInterval(updateTime, 1000);
-    updateTime();
+<div class="overlay">
+  <div class="location">Decatur, Alabama</div>
+  <div class="details" id="info">Loading...</div>
+</div>
 
-    // ===== Location + Weather
-    let lat = 34.6059, lon = -86.9833; // fallback Decatur
-    let hasGPS = false;
+<script>
+function updateTime() {
+  const now = new Date();
+  const time = now.toLocaleTimeString([], {hour: 'numeric', minute:'2-digit', second:'2-digit'});
+  document.getElementById("info").innerHTML = "57°F • " + time;
+}
 
-    function setLocationText(text){
-      document.getElementById("location").textContent = text;
-    }
+setInterval(updateTime, 1000);
+updateTime();
+</script>
 
-    async function updateWeather(){
-      try{
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`;
-        const r = await fetch(url, { cache: "no-store" });
-        const data = await r.json();
-        const c = data?.current_weather?.temperature;
-        if (typeof c === "number"){
-          const f = Math.round(c * 9/5 + 32);
-          document.getElementById("temp").textContent = `${f}°F`;
-        }
-      }catch(e){}
-    }
-
-    // Prefer neighborhood/suburb where available, else city/town, else county/state
-    async function updateLocationName(){
-      try{
-        const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}`;
-        const r = await fetch(url, { cache: "no-store" });
-        const data = await r.json();
-        const a = data.address || {};
-
-        const neighborhood = a.neighbourhood || a.suburb || a.quarter || "";
-        const city = a.city || a.town || a.village || a.hamlet || "";
-        const county = a.county || "";
-        const state = a.state || a.state_code || "AL";
-
-        let line1 = "";
-        if (neighborhood && city) line1 = `${neighborhood}, ${city}`;
-        else if (city) line1 = city;
-        else if (county) line1 = county.replace(" County","");
-
-        if (!line1) line1 = "Unknown Area";
-
-        // For the “premium look” you liked:
-        setLocationText(`${line1}, ${state}`);
-      }catch(e){
-        // fallback
-        setLocationText("Decatur, Alabama");
-      }
-    }
-
-    function startGPS(){
-      if (!navigator.geolocation){
-        setLocationText("Decatur, Alabama");
-        updateWeather(); updateLocationName();
-        return;
-      }
-
-      navigator.geolocation.watchPosition(
-        (pos)=>{
-          lat = pos.coords.latitude;
-          lon = pos.coords.longitude;
-          hasGPS = true;
-        },
-        ()=>{
-          if (!hasGPS) setLocationText("Enable Location");
-        },
-        { enableHighAccuracy:true, maximumAge:30000, timeout:10000 }
-      );
-
-      // update immediately and then every 2 minutes
-      updateWeather(); updateLocationName();
-      setInterval(()=>{ updateWeather(); updateLocationName(); }, 120000);
-    }
-
-    startGPS();
-  </script>
 </body>
 </html>
