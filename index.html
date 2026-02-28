@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Live Walk Overlay</title>
-
   <style>
     body{
       margin:0;
@@ -18,37 +17,29 @@
       right:4vw;
       bottom:4vh;
       text-align:right;
-      pointer-events:none;
+      pointer-events:none; /* so it won’t block taps */
     }
     .place{
       font-size:2.4vh;
-      font-weight:400;
+      font-weight:400;      /* thinner */
       letter-spacing:2px;
       text-transform:uppercase;
       text-shadow:0 2px 10px rgba(0,0,0,.7);
       white-space:nowrap;
-      line-height:1.15;
     }
     .meta{
       margin-top:.25vh;
       font-size:1.6vh;
-      font-weight:300;
+      font-weight:300;      /* thinner */
       opacity:.9;
       text-shadow:0 2px 10px rgba(0,0,0,.7);
       white-space:nowrap;
     }
   </style>
 </head>
-
 <body>
   <div class="overlay">
-    <!-- Line 1: landmark/park/neighborhood (only shown when available) -->
-    <div class="place" id="placeTop" style="display:none;">Locating…</div>
-
-    <!-- Line 2: city, state (always shown once we can resolve) -->
     <div class="place" id="place">Locating…</div>
-
-    <!-- Line 3: temp + time -->
     <div class="meta" id="meta">--°F • --:--:--</div>
   </div>
 
@@ -56,7 +47,7 @@
     // --- CONFIG ---
     const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
     const WEATHER_REFRESH_MS = 300000; // 5 min
-    const GEO_REFRESH_MS = 60000;      // 1 min (updates as you move)
+    const GEO_REFRESH_MS = 60000;      // 1 min (updates place as you move)
 
     let lastTempF = "--";
     let lastCoords = null;
@@ -72,83 +63,46 @@
     }
     setInterval(updateMeta, 1000);
 
-    function normalizeState(state){
-      // Keep your preference: show full state names (Alabama, New York)
-      return state || "";
+    function isUseful(v){
+      return v && typeof v === "string" && v.trim().length > 2 && v.toLowerCase() !== "yes";
     }
 
-    function setPlaceLines(topLine, cityStateLine){
-      const topEl = document.getElementById("placeTop");
-      const cityEl = document.getElementById("place");
-
-      if (topLine && topLine.trim()){
-        topEl.style.display = "block";
-        topEl.textContent = topLine;
-      } else {
-        topEl.style.display = "none";
-        topEl.textContent = "";
-      }
-
-      cityEl.textContent = cityStateLine && cityStateLine.trim() ? cityStateLine : "Location";
-    }
-
-    function pickBestPlaceLines(addr){
-      // Prefer a specific “feature” name first (parks/refuges/landmarks) when available
-      // NOTE: Nominatim may provide different keys depending on the OSM tagging in that area.
-      const feature =
-        addr.national_park ||
-        addr.park ||
-        addr.protected_area ||
-        addr.nature_reserve ||
+    function pickBestPlace(addr, displayName){
+      // Prefer named landmarks/parks/attractions if present
+      const landmark =
         addr.attraction ||
+        addr.park ||
         addr.leisure ||
         addr.tourism ||
+        addr.historic ||
         addr.natural ||
-        addr.museum ||
-        addr.zoo ||
-        addr.aerodrome ||
-        "";
+        addr.aeroway ||
+        addr.building ||
+        addr.amenity ||
+        addr.place ||
+        null;
 
-      const neighborhood =
-        addr.neighbourhood ||
-        addr.neighborhood ||
-        addr.quarter ||
-        "";
+      const neighborhood = addr.neighbourhood || addr.neighborhood;
+      const suburb = addr.suburb;
+      const city = addr.city || addr.town || addr.village || addr.hamlet;
+      const state = addr.state || addr.region;
+      const country = addr.country;
 
-      const district =
-        addr.suburb ||
-        addr.city_district ||
-        addr.borough ||
-        addr.district ||
-        "";
+      // If Nominatim gives a strong "display_name", use its first part as a landmark hint
+      let displayFirst = "";
+      if (isUseful(displayName)) {
+        displayFirst = displayName.split(",")[0].trim();
+        if (!isUseful(displayFirst)) displayFirst = "";
+      }
 
-      const city =
-        addr.city ||
-        addr.town ||
-        addr.village ||
-        addr.hamlet ||
-        "";
+      // Choose the best "top line"
+      const top = isUseful(landmark) ? landmark : (displayFirst || neighborhood || suburb || city || state || country || "Your Location");
 
-      const state = normalizeState(addr.state || addr.region || "");
-      const country = addr.country || "";
+      // Choose the best "second part" to anchor it
+      const anchor = (city && city !== top) ? city : ((state && state !== top) ? state : ((country && country !== top) ? country : ""));
 
-      // Top line preference order:
-      // feature -> neighborhood -> district
-      const topLine = feature || neighborhood || district || "";
-
-      // Second line: City, State (fallbacks if not available)
-      let cityState = "";
-      if (city && state) cityState = `${city}, ${state}`;
-      else if (city) cityState = city;
-      else if (state && country) cityState = `${state}, ${country}`;
-      else cityState = country || "Your Location";
-
-      // If topLine equals city or state, don’t repeat it.
-      // (Example: some places return "New York" as a district too.)
-      const topClean = (topLine && (topLine === city || topLine === state)) ? "" : topLine;
-
-      // If we have no top line, just show City, State on the main line like before.
-      return { topLine: topClean, cityStateLine: cityState };
+      // Keep it clean: usually 2 parts max
+      return anchor ? `${top}, ${anchor}` : top;
     }
 
     async function reverseGeocode(lat, lon){
@@ -157,7 +111,8 @@
       if (!res.ok) throw new Error("geocode failed");
       const data = await res.json();
       const addr = data.address || {};
-      return pickBestPlaceLines(addr);
+      const displayName = data.display_name || "";
+      return pickBestPlace(addr, displayName);
     }
 
     async function fetchWeather(lat, lon){
@@ -171,26 +126,27 @@
     }
 
     async function refreshAll(lat, lon){
+      // Only reverse-geocode if moved a bit (or first run) so we don’t hammer it
       const movedEnough = !lastCoords
         || Math.abs(lat - lastCoords.lat) > 0.002
         || Math.abs(lon - lastCoords.lon) > 0.002;
 
       lastCoords = {lat, lon};
 
-      // weather every time
+      // Weather every time
       fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; updateMeta(); });
 
-      // place sometimes (only when moved enough)
+      // Place name sometimes
       if (movedEnough){
         reverseGeocode(lat, lon)
-          .then(({topLine, cityStateLine}) => setPlaceLines(topLine, cityStateLine))
-          .catch(() => setPlaceLines("", "Location"));
+          .then(place => setText("place", place))
+          .catch(() => setText("place", "Location"));
       }
     }
 
     function startGeolocation(){
       if (!navigator.geolocation){
-        setPlaceLines("", "No GPS");
+        setText("place", "No GPS");
         return;
       }
 
@@ -201,10 +157,14 @@
       };
 
       const onErr = () => {
-        setPlaceLines("", "Enable Location");
+        setText("place", "Enable Location");
+        // time keeps updating, temp stays "--"
       };
 
+      // Initial position
       navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
+
+      // Keep updating as you move
       setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
     }
 
@@ -212,7 +172,7 @@
     updateMeta();
     startGeolocation();
 
-    // Also refresh weather periodically even if you aren’t moving
+    // Refresh weather periodically even if you aren’t moving
     setInterval(() => {
       if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
     }, WEATHER_REFRESH_MS);
