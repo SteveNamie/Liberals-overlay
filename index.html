@@ -48,6 +48,7 @@
     const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
     const WEATHER_REFRESH_MS = 300000; // 5 min
     const GEO_REFRESH_MS = 60000;      // 1 min
+    const MOVE_EPS = 0.002;            // ~200m-ish in lat/lon
 
     let lastTempF = "--";
     let lastCoords = null;
@@ -67,59 +68,91 @@
       return v && typeof v === "string" && v.trim().length > 2 && v.toLowerCase() !== "yes";
     }
 
+    // Reject anything that looks like a street address / house number
+    function looksLikeStreetAddress(s){
+      if (!isUseful(s)) return false;
+      const t = s.trim();
+
+      // starts with house number
+      if (/^\d{1,6}\s+\S+/.test(t)) return true;
+
+      // contains common street suffixes
+      if (/\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|ct|court|cir|circle|hwy|highway|pkwy|parkway|trl|trail|way|pl|place)\b/i.test(t)) {
+        // paired with a number somewhere is very likely an address
+        if (/\d/.test(t)) return true;
+      }
+
+      return false;
+    }
+
     function cleanTopFromDisplay(displayName){
-      // First chunk of "display_name" is often the POI/park if one exists.
+      // display_name often starts with a POI or an address; we want the first part ONLY if it's not an address
       if (!isUseful(displayName)) return "";
       const first = displayName.split(",")[0].trim();
-      return isUseful(first) ? first : "";
+      if (!isUseful(first)) return "";
+      if (looksLikeStreetAddress(first)) return "";
+      return first;
     }
 
     function pickBestPlace(addr, displayName, namedetails){
+      const neighborhood = addr.neighbourhood || addr.neighborhood || "";
+      const suburb = addr.suburb || "";
       const city = addr.city || addr.town || addr.village || addr.hamlet || "";
       const state = addr.state || addr.region || "";
       const country = addr.country || "";
 
-      // Try to get a strong POI/landmark name first
-      const namedetailName = namedetails && (namedetails.name || namedetails["name:en"]) ? (namedetails.name || namedetails["name:en"]) : "";
+      const namedetailName =
+        (namedetails && (namedetails.name || namedetails["name:en"])) ?
+          (namedetails.name || namedetails["name:en"]) : "";
 
-      const landmark =
-        namedetailName ||
-        addr.attraction ||
-        addr.tourism ||
-        addr.leisure ||
-        addr.park ||
-        addr.historic ||
-        addr.natural ||
-        addr.amenity ||
-        addr.building ||
-        cleanTopFromDisplay(displayName) ||
-        addr.neighbourhood || addr.neighborhood ||
-        addr.suburb ||
-        city ||
-        state ||
-        country ||
-        "Your Location";
+      // Landmark candidates (many are categories, but sometimes they're actual named POIs)
+      const landmarkCandidates = [
+        namedetailName,
+        addr.attraction,
+        addr.tourism,
+        addr.leisure,
+        addr.park,
+        addr.historic,
+        addr.natural,
+        addr.amenity,
+        addr.building,
+        cleanTopFromDisplay(displayName),
+      ].filter(isUseful);
 
-      // Anchor rules:
-      // - If we have a city, anchor with state (or city with state)
-      // - If we only have a state, do NOT add "United States" (keep it clean)
-      // - If we have a landmark/park name, anchor with city or state if available
-      const top = landmark;
+      // Choose first landmark candidate that does NOT look like an address
+      let landmark = "";
+      for (const c of landmarkCandidates) {
+        if (!looksLikeStreetAddress(c)) { landmark = c; break; }
+      }
 
-      // If the "top" is literally the state, just show state (no country)
-      if (isUseful(state) && top === state) return state;
+      // If we didn't get a landmark, fall back to locality (never show house number/road)
+      const local = isUseful(landmark) ? landmark
+                  : (isUseful(neighborhood) ? neighborhood
+                  : (isUseful(suburb) ? suburb
+                  : (isUseful(city) ? city
+                  : (isUseful(state) ? state
+                  : (isUseful(country) ? country : "Your Location")))));
 
-      // If top looks like a broad area (country), just show it
-      if (isUseful(country) && top === country) return country;
+      // Anchor it cleanly:
+      // - If local is neighborhood/suburb/landmark, anchor with "City, State" when possible
+      // - If local is City, anchor with State
+      // - If local is State, don't add country
+      if (isUseful(state) && local === state) return state;
 
-      const anchor = isUseful(city) ? (isUseful(state) ? state : city)
-                    : (isUseful(state) ? state : "");
+      let anchor = "";
+      if (isUseful(city) && local !== city) {
+        anchor = isUseful(state) ? `${city}, ${state}` : city;
+      } else if (isUseful(state) && local !== state) {
+        anchor = state;
+      }
 
-      return (anchor && anchor !== top) ? `${top}, ${anchor}` : top;
+      // If anchor would redundantly repeat local, skip it
+      if (anchor && anchor !== local) return `${local}, ${anchor}`;
+      return local;
     }
 
     async function reverseGeocode(lat, lon){
-      // Tight zoom + namedetails/extratags improves odds of POI/park names.
+      // namedetails/extratags can help; zoom=18 is a good “place” level
       const url =
         `https://nominatim.openstreetmap.org/reverse` +
         `?format=jsonv2&lat=${lat}&lon=${lon}` +
@@ -128,10 +161,7 @@
       const res = await fetch(url, { headers: { "Accept": "application/json" }});
       if (!res.ok) throw new Error("geocode failed");
       const data = await res.json();
-      const addr = data.address || {};
-      const displayName = data.display_name || "";
-      const namedetails = data.namedetails || {};
-      return pickBestPlace(addr, displayName, namedetails);
+      return pickBestPlace(data.address || {}, data.display_name || "", data.namedetails || {});
     }
 
     async function fetchWeather(lat, lon){
@@ -146,8 +176,8 @@
 
     async function refreshAll(lat, lon){
       const movedEnough = !lastCoords
-        || Math.abs(lat - lastCoords.lat) > 0.002
-        || Math.abs(lon - lastCoords.lon) > 0.002;
+        || Math.abs(lat - lastCoords.lat) > MOVE_EPS
+        || Math.abs(lon - lastCoords.lon) > MOVE_EPS;
 
       lastCoords = {lat, lon};
 
