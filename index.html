@@ -57,6 +57,7 @@
     const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
     const WEATHER_REFRESH_MS = 300000; // 5 min
     const GEO_REFRESH_MS = 60000;      // 1 min (updates as you move)
+    const MOVE_EPS = 0.002;            // ~200m threshold before re-geocoding
 
     let lastTempF = "--";
     let lastCoords = null;
@@ -72,11 +73,6 @@
     }
     setInterval(updateMeta, 1000);
 
-    function normalizeState(state){
-      // Keep your preference: show full state names (Alabama, New York)
-      return state || "";
-    }
-
     function setPlaceLines(topLine, cityStateLine){
       const topEl = document.getElementById("placeTop");
       const cityEl = document.getElementById("place");
@@ -89,12 +85,11 @@
         topEl.textContent = "";
       }
 
-      cityEl.textContent = cityStateLine && cityStateLine.trim() ? cityStateLine : "Location";
+      cityEl.textContent = (cityStateLine && cityStateLine.trim()) ? cityStateLine : "Location";
     }
 
     function pickBestPlaceLines(addr){
-      // Prefer a specific “feature” name first (parks/refuges/landmarks) when available
-      // NOTE: Nominatim may provide different keys depending on the OSM tagging in that area.
+      // Prefer named features first (parks/refuges/landmarks) when available
       const feature =
         addr.national_park ||
         addr.park ||
@@ -103,6 +98,7 @@
         addr.attraction ||
         addr.leisure ||
         addr.tourism ||
+        addr.historic ||
         addr.natural ||
         addr.museum ||
         addr.zoo ||
@@ -129,30 +125,33 @@
         addr.hamlet ||
         "";
 
-      const state = normalizeState(addr.state || addr.region || "");
+      const state = addr.state || addr.region || "";
       const country = addr.country || "";
 
-      // Top line preference order:
+      // Top line preference:
       // feature -> neighborhood -> district
-      const topLine = feature || neighborhood || district || "";
+      let topLine = feature || neighborhood || district || "";
 
-      // Second line: City, State (fallbacks if not available)
+      // Second line: City, State (clean fallbacks; never show State, Country)
       let cityState = "";
       if (city && state) cityState = `${city}, ${state}`;
       else if (city) cityState = city;
-      else if (state && country) cityState = `${state}, ${country}`;
+      else if (state) cityState = state;
       else cityState = country || "Your Location";
 
-      // If topLine equals city or state, don’t repeat it.
-      // (Example: some places return "New York" as a district too.)
-      const topClean = (topLine && (topLine === city || topLine === state)) ? "" : topLine;
+      // Avoid repeating the same thing
+      if (topLine && (topLine === city || topLine === state)) topLine = "";
 
-      // If we have no top line, just show City, State on the main line like before.
-      return { topLine: topClean, cityStateLine: cityState };
+      return { topLine, cityStateLine: cityState };
     }
 
     async function reverseGeocode(lat, lon){
-      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+      // No street address usage here; we only read "address" fields.
+      // zoom=18 improves odds of parks/POIs without forcing house numbers.
+      const url =
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2` +
+        `&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1&namedetails=1&extratags=1`;
+
       const res = await fetch(url, { headers: { "Accept": "application/json" }});
       if (!res.ok) throw new Error("geocode failed");
       const data = await res.json();
@@ -172,15 +171,15 @@
 
     async function refreshAll(lat, lon){
       const movedEnough = !lastCoords
-        || Math.abs(lat - lastCoords.lat) > 0.002
-        || Math.abs(lon - lastCoords.lon) > 0.002;
+        || Math.abs(lat - lastCoords.lat) > MOVE_EPS
+        || Math.abs(lon - lastCoords.lon) > MOVE_EPS;
 
       lastCoords = {lat, lon};
 
-      // weather every time
+      // Weather every time
       fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; updateMeta(); });
 
-      // place sometimes (only when moved enough)
+      // Place only when moved enough
       if (movedEnough){
         reverseGeocode(lat, lon)
           .then(({topLine, cityStateLine}) => setPlaceLines(topLine, cityStateLine))
@@ -194,15 +193,8 @@
         return;
       }
 
-      const onPos = (pos) => {
-        const lat = pos.coords.latitude;
-        const lon = pos.coords.longitude;
-        refreshAll(lat, lon);
-      };
-
-      const onErr = () => {
-        setPlaceLines("", "Enable Location");
-      };
+      const onPos = (pos) => refreshAll(pos.coords.latitude, pos.coords.longitude);
+      const onErr = () => setPlaceLines("", "Enable Location");
 
       navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
       setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
@@ -212,7 +204,7 @@
     updateMeta();
     startGeolocation();
 
-    // Also refresh weather periodically even if you aren’t moving
+    // Refresh weather periodically even if you aren’t moving
     setInterval(() => {
       if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
     }, WEATHER_REFRESH_MS);
