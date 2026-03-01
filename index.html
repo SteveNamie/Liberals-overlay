@@ -1,291 +1,334 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Live Walk Overlay</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Walk Overlay</title>
 
-<style>
-body{
-margin:0;
-background:transparent;
-overflow:hidden;
-font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
-color:#fff;
-}
+  <style>
+    :root{
+      /* Defaults (you can override via URL params) */
+      --placeSize: 2.4vh;   /* location line(s) */
+      --metaSize:  1.6vh;   /* temp + time line */
+      --scale: 1;           /* scales everything together */
+      --dotMin: 0.25;       /* dot “breath” low opacity */
+      --dotMax: 0.90;       /* dot “breath” high opacity */
+      --dotBreathSec: 3.6s; /* dot breathing speed */
+    }
 
-.overlay{
-position:fixed;
-right:4vw;
-bottom:4vh;
-text-align:right;
-pointer-events:none;
-}
+    body{
+      margin:0;
+      background:transparent;
+      overflow:hidden;
+      font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+      color:#fff;
+    }
 
-.place{
-font-size:2.9vh;   /* increased from previous */
-font-weight:400;
-letter-spacing:2px;
-text-transform:uppercase;
-text-shadow:0 2px 10px rgba(0,0,0,.7);
-white-space:nowrap;
-line-height:1.15;
-opacity:1;
-transition:opacity .55s ease;
-}
+    .overlay{
+      position:fixed;
+      right:4vw;
+      bottom:4vh;
+      text-align:right;
+      pointer-events:none;
 
-.meta{
-margin-top:.25vh;
-font-size:2.2vh;   /* increased from previous */
-font-weight:300;
-opacity:.9;
-text-shadow:0 2px 10px rgba(0,0,0,.7);
-white-space:nowrap;
-transition:opacity .55s ease;
-}
+      /* Scale control (Larix-friendly: just change URL param) */
+      transform: scale(var(--scale));
+      transform-origin: right bottom;
+    }
 
-.dot{
-display:inline-block;
-margin:0 .35em;
-animation:dotFade 4s ease-in-out infinite;
-}
+    .place{
+      font-size: var(--placeSize);
+      font-weight:400;
+      letter-spacing:2px;
+      text-transform:uppercase;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+      line-height:1.15;
+    }
 
-@keyframes dotFade{
-0%{opacity:.2;}
-50%{opacity:1;}
-100%{opacity:.2;}
-}
+    .meta{
+      margin-top:.25vh;
+      font-size: var(--metaSize);
+      font-weight:300;
+      opacity:.9;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+    }
 
-.fadeOut{
-opacity:0;
-}
-</style>
+    /* Smooth fade for text updates */
+    .fadeTarget{
+      opacity:1;
+      transition:opacity 550ms ease;
+      will-change:opacity;
+    }
+    .fadingOut{ opacity:0; }
+
+    /* Breathing divider dot */
+    .dot{
+      display:inline-block;
+      margin: 0 0.6ch;
+      opacity: var(--dotMin);
+      animation: dotBreath var(--dotBreathSec) ease-in-out infinite;
+      will-change: opacity;
+    }
+    @keyframes dotBreath{
+      0%   { opacity: var(--dotMin); }
+      50%  { opacity: var(--dotMax); }
+      100% { opacity: var(--dotMin); }
+    }
+  </style>
 </head>
 
 <body>
+  <div class="overlay">
+    <!-- Line 1: landmark/park/neighborhood (only shown when available) -->
+    <div class="place fadeTarget" id="placeTop" style="display:none;">Locating…</div>
 
-<div class="overlay">
+    <!-- Line 2: city, state (always shown once we can resolve) -->
+    <div class="place fadeTarget" id="place">Locating…</div>
 
-<div class="place" id="placeTop" style="display:none;">Locating…</div>
+    <!-- Line 3: temp + time -->
+    <div class="meta fadeTarget" id="meta">
+      --°F<span class="dot">•</span>--:--:--
+    </div>
+  </div>
 
-<div class="place" id="place">Locating…</div>
+  <script>
+    // --- CONFIG ---
+    const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
+    const WEATHER_REFRESH_MS = 300000; // 5 min
+    const GEO_REFRESH_MS = 60000;      // 1 min (updates as you move)
 
-<div class="meta" id="meta">
---°F <span class="dot">•</span> --:--:--
-</div>
+    // Fade timing
+    const FADE_OUT_MS = 260;
+    const FADE_IN_DELAY_MS = 40;
 
-</div>
+    let lastTempF = "--";
+    let lastCoords = null;
 
-<script>
+    // Track last displayed text to avoid unnecessary fades
+    let lastTopText = "";
+    let lastMainText = "";
+    let lastMetaText = "";
 
-const GEO_OPTIONS={enableHighAccuracy:true,maximumAge:15000,timeout:15000};
-const WEATHER_REFRESH_MS=300000;
-const GEO_REFRESH_MS=60000;
+    // --- URL size controls (Larix: just edit the overlay URL) ---
+    // Examples:
+    // ?scale=1.10
+    // ?place=2.65&meta=1.95
+    // ?place=2.65&meta=1.95&scale=1.05
+    (function applyUrlSizing(){
+      const qs = new URLSearchParams(location.search);
 
-let lastTempF="--";
-let lastCoords=null;
+      const scale = parseFloat(qs.get("scale"));
+      if (Number.isFinite(scale) && scale > 0.2 && scale < 3){
+        document.documentElement.style.setProperty("--scale", String(scale));
+      }
 
-let lastTopText="";
-let lastMainText="";
+      const place = parseFloat(qs.get("place"));
+      if (Number.isFinite(place) && place > 0.5 && place < 8){
+        document.documentElement.style.setProperty("--placeSize", `${place}vh`);
+      }
 
-function formatTime(){
-return new Date().toLocaleTimeString([],{
-hour:'numeric',
-minute:'2-digit',
-second:'2-digit'
-});
-}
+      const meta = parseFloat(qs.get("meta"));
+      if (Number.isFinite(meta) && meta > 0.5 && meta < 8){
+        document.documentElement.style.setProperty("--metaSize", `${meta}vh`);
+      }
 
-function updateMeta(){
-document.getElementById("meta").innerHTML=
-`${lastTempF}°F <span class="dot">•</span> ${formatTime()}`;
-}
+      const breath = parseFloat(qs.get("breath"));
+      if (Number.isFinite(breath) && breath > 1 && breath < 20){
+        document.documentElement.style.setProperty("--dotBreathSec", `${breath}s`);
+      }
+    })();
 
-setInterval(updateMeta,1000);
+    function setText(id, txt){ document.getElementById(id).textContent = txt; }
 
-function normalizeState(state){
-return state||"";
-}
+    function formatTime(){
+      return new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+    }
 
-function setPlaceVisibility(topLine){
-const topEl=document.getElementById("placeTop");
-if(topLine && topLine.trim()){
-topEl.style.display="block";
-}else{
-topEl.style.display="none";
-}
-}
+    function normalizeState(state){
+      return state || "";
+    }
 
-function setPlaceLinesSmooth(topLine,cityStateLine){
+    function setPlaceVisibility(topLine){
+      const topEl = document.getElementById("placeTop");
+      if (topLine && topLine.trim()){
+        topEl.style.display = "block";
+      } else {
+        topEl.style.display = "none";
+      }
+    }
 
-const topEl=document.getElementById("placeTop");
-const mainEl=document.getElementById("place");
+    function fadeSwap(el, newText){
+      el.classList.add("fadingOut");
+      setTimeout(() => {
+        el.textContent = newText;
+        setTimeout(() => el.classList.remove("fadingOut"), FADE_IN_DELAY_MS);
+      }, FADE_OUT_MS);
+    }
 
-const newTop=(topLine||"").trim();
-const newMain=(cityStateLine||"Location").trim();
+    // Location: Fade out -> swap -> fade in
+    function setPlaceLinesSmooth(topLine, cityStateLine){
+      const topEl = document.getElementById("placeTop");
+      const mainEl = document.getElementById("place");
 
-if(newTop===lastTopText && newMain===lastMainText) return;
+      const newTop = (topLine || "").trim();
+      const newMain = (cityStateLine || "Location").trim();
 
-lastTopText=newTop;
-lastMainText=newMain;
+      if (newTop === lastTopText && newMain === lastMainText) return;
 
-setPlaceVisibility(newTop);
+      lastTopText = newTop;
+      lastMainText = newMain;
 
-topEl.classList.add("fadeOut");
-mainEl.classList.add("fadeOut");
+      setPlaceVisibility(newTop);
 
-setTimeout(()=>{
+      topEl.classList.add("fadingOut");
+      mainEl.classList.add("fadingOut");
 
-topEl.textContent=newTop||"";
-mainEl.textContent=newMain;
+      setTimeout(() => {
+        topEl.textContent = newTop || "";
+        mainEl.textContent = newMain || "Location";
 
-setPlaceVisibility(newTop);
+        setPlaceVisibility(newTop);
 
-setTimeout(()=>{
-topEl.classList.remove("fadeOut");
-mainEl.classList.remove("fadeOut");
-},40);
+        setTimeout(() => {
+          topEl.classList.remove("fadingOut");
+          mainEl.classList.remove("fadingOut");
+        }, FADE_IN_DELAY_MS);
 
-},260);
-}
+      }, FADE_OUT_MS);
+    }
 
-function pickBestPlaceLines(addr){
+    // Weather/meta: Fade out -> swap -> fade in (keeps the breathing dot span)
+    function setMetaSmooth(tempF, timeStr){
+      const metaEl = document.getElementById("meta");
+      const next = `${tempF}°F • ${timeStr}`; // for change detection only
+      if (next === lastMetaText) return;
+      lastMetaText = next;
 
-const feature=
-addr.national_park||
-addr.park||
-addr.protected_area||
-addr.nature_reserve||
-addr.attraction||
-addr.leisure||
-addr.tourism||
-addr.natural||
-addr.museum||
-addr.zoo||
-addr.aerodrome||
-"";
+      metaEl.classList.add("fadingOut");
+      setTimeout(() => {
+        metaEl.innerHTML = `${tempF}°F<span class="dot">•</span>${timeStr}`;
+        setTimeout(() => metaEl.classList.remove("fadingOut"), FADE_IN_DELAY_MS);
+      }, FADE_OUT_MS);
+    }
 
-const neighborhood=
-addr.neighbourhood||
-addr.neighborhood||
-addr.quarter||
-"";
+    function pickBestPlaceLines(addr){
+      const feature =
+        addr.national_park ||
+        addr.park ||
+        addr.protected_area ||
+        addr.nature_reserve ||
+        addr.attraction ||
+        addr.leisure ||
+        addr.tourism ||
+        addr.natural ||
+        addr.museum ||
+        addr.zoo ||
+        addr.aerodrome ||
+        "";
 
-const district=
-addr.suburb||
-addr.city_district||
-addr.borough||
-addr.district||
-"";
+      const neighborhood =
+        addr.neighbourhood ||
+        addr.neighborhood ||
+        addr.quarter ||
+        "";
 
-const city=
-addr.city||
-addr.town||
-addr.village||
-addr.hamlet||
-"";
+      const district =
+        addr.suburb ||
+        addr.city_district ||
+        addr.borough ||
+        addr.district ||
+        "";
 
-const state=normalizeState(addr.state||addr.region||"");
-const country=addr.country||"";
+      const city =
+        addr.city ||
+        addr.town ||
+        addr.village ||
+        addr.hamlet ||
+        "";
 
-const topLine=feature||neighborhood||district||"";
+      const state = normalizeState(addr.state || addr.region || "");
+      const country = addr.country || "";
 
-let cityState="";
-if(city && state) cityState=`${city}, ${state}`;
-else if(city) cityState=city;
-else if(state && country) cityState=`${state}, ${country}`;
-else cityState=country||"Your Location";
+      const topLine = feature || neighborhood || district || "";
 
-const topClean=(topLine && (topLine===city || topLine===state))?"":topLine;
+      let cityState = "";
+      if (city && state) cityState = `${city}, ${state}`;
+      else if (city) cityState = city;
+      else if (state && country) cityState = `${state}, ${country}`;
+      else cityState = country || "Your Location";
 
-return{topLine:topClean,cityStateLine:cityState};
-}
+      const topClean = (topLine && (topLine === city || topLine === state)) ? "" : topLine;
 
-async function reverseGeocode(lat,lon){
+      return { topLine: topClean, cityStateLine: cityState };
+    }
 
-const url=`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+    async function reverseGeocode(lat, lon){
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+      const res = await fetch(url, { headers: { "Accept": "application/json" }});
+      if (!res.ok) throw new Error("geocode failed");
+      const data = await res.json();
+      const addr = data.address || {};
+      return pickBestPlaceLines(addr);
+    }
 
-const res=await fetch(url,{headers:{"Accept":"application/json"}});
-if(!res.ok) throw new Error("geocode failed");
+    async function fetchWeather(lat, lon){
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("weather failed");
+      const data = await res.json();
+      const t = Math.round(data.current_weather?.temperature);
+      if (Number.isFinite(t)) lastTempF = t;
+      setMetaSmooth(lastTempF, formatTime());
+    }
 
-const data=await res.json();
-const addr=data.address||{};
+    function tickClock(){
+      setMetaSmooth(lastTempF, formatTime());
+    }
+    setInterval(tickClock, 1000);
 
-return pickBestPlaceLines(addr);
-}
+    async function refreshAll(lat, lon){
+      const movedEnough = !lastCoords
+        || Math.abs(lat - lastCoords.lat) > 0.002
+        || Math.abs(lon - lastCoords.lon) > 0.002;
 
-async function fetchWeather(lat,lon){
+      lastCoords = {lat, lon};
 
-const url=`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`;
+      fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; setMetaSmooth(lastTempF, formatTime()); });
 
-const res=await fetch(url);
-if(!res.ok) throw new Error("weather failed");
+      if (movedEnough){
+        reverseGeocode(lat, lon)
+          .then(({topLine, cityStateLine}) => setPlaceLinesSmooth(topLine, cityStateLine))
+          .catch(() => setPlaceLinesSmooth("", "Location"));
+      }
+    }
 
-const data=await res.json();
+    function startGeolocation(){
+      if (!navigator.geolocation){
+        setPlaceLinesSmooth("", "No GPS");
+        return;
+      }
 
-const t=Math.round(data.current_weather?.temperature);
-if(Number.isFinite(t)) lastTempF=t;
+      const onPos = (pos) => {
+        refreshAll(pos.coords.latitude, pos.coords.longitude);
+      };
 
-updateMeta();
-}
+      const onErr = () => {
+        setPlaceLinesSmooth("", "Enable Location");
+      };
 
-async function refreshAll(lat,lon){
+      navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
+      setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
+    }
 
-const movedEnough=!lastCoords||
-Math.abs(lat-lastCoords.lat)>0.002||
-Math.abs(lon-lastCoords.lon)>0.002;
+    // Kick off
+    setMetaSmooth(lastTempF, formatTime());
+    startGeolocation();
 
-lastCoords={lat,lon};
-
-fetchWeather(lat,lon).catch(()=>{
-lastTempF="--";
-updateMeta();
-});
-
-if(movedEnough){
-reverseGeocode(lat,lon)
-.then(({topLine,cityStateLine})=>{
-setPlaceLinesSmooth(topLine,cityStateLine);
-})
-.catch(()=>{
-setPlaceLinesSmooth("","Location");
-});
-}
-}
-
-function startGeolocation(){
-
-if(!navigator.geolocation){
-setPlaceLinesSmooth("","No GPS");
-return;
-}
-
-const onPos=(pos)=>{
-const lat=pos.coords.latitude;
-const lon=pos.coords.longitude;
-refreshAll(lat,lon);
-};
-
-const onErr=()=>{
-setPlaceLinesSmooth("","Enable Location");
-};
-
-navigator.geolocation.getCurrentPosition(onPos,onErr,GEO_OPTIONS);
-
-setInterval(()=>{
-navigator.geolocation.getCurrentPosition(onPos,onErr,GEO_OPTIONS);
-},GEO_REFRESH_MS);
-}
-
-updateMeta();
-startGeolocation();
-
-setInterval(()=>{
-if(lastCoords){
-fetchWeather(lastCoords.lat,lastCoords.lon).catch(()=>{});
-}
-},WEATHER_REFRESH_MS);
-
-</script>
+    setInterval(() => {
+      if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
+    }, WEATHER_REFRESH_MS);
+  </script>
 </body>
 </html>
