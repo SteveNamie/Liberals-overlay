@@ -21,7 +21,7 @@
       pointer-events:none;
     }
     .place{
-      font-size:2.4vh;          /* NO SIZE CHANGE */
+      font-size:2.65vh; /* +0.25 */
       font-weight:400;
       letter-spacing:2px;
       text-transform:uppercase;
@@ -31,46 +31,73 @@
     }
     .meta{
       margin-top:.25vh;
-      font-size:1.6vh;          /* NO SIZE CHANGE */
+      font-size:1.85vh; /* +0.25 */
       font-weight:300;
       opacity:.9;
       text-shadow:0 2px 10px rgba(0,0,0,.7);
       white-space:nowrap;
     }
 
-    /* --- ONLY CHANGE: smooth fade for location lines when they update --- */
+    /* Location fade (only affects location lines) */
     .fadeTarget{
       opacity:1;
       transition:opacity 550ms ease;
       will-change:opacity;
     }
-    .fadingOut{
-      opacity:0;
+    .fadingOut{ opacity:0; }
+
+    /* Slow breathing dot (not a blink) */
+    .dot{
+      display:inline-block;
+      margin:0 .55em;
+      opacity:.55;
+      animation: dotPulse 3.6s ease-in-out infinite;
+      transform: translateZ(0);
+      will-change: opacity;
     }
+    @keyframes dotPulse{
+      0%   { opacity:.20; }
+      50%  { opacity:.85; }
+      100% { opacity:.20; }
+    }
+    @media (prefers-reduced-motion: reduce){
+      .dot{ animation:none; opacity:.65; }
+    }
+
+    /* Temperature fade (only affects temp text) */
+    #temp{
+      display:inline-block;
+      opacity:1;
+      transition: opacity 650ms ease;
+      will-change: opacity;
+    }
+    #temp.tempOut{ opacity:0; }
   </style>
 </head>
 
 <body>
   <div class="overlay">
-    <!-- Line 1: landmark/park/neighborhood (only shown when available) -->
     <div class="place fadeTarget" id="placeTop" style="display:none;">Locating…</div>
-
-    <!-- Line 2: city, state (always shown once we can resolve) -->
     <div class="place fadeTarget" id="place">Locating…</div>
 
-    <!-- Line 3: temp + time -->
-    <div class="meta" id="meta">--°F • --:--:--</div>
+    <div class="meta" id="meta">
+      <span id="temp">--°F</span><span class="dot">•</span><span id="time">--:--:--</span>
+    </div>
   </div>
 
   <script>
-    // --- CONFIG (UNCHANGED) ---
+    // --- CONFIG ---
     const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
     const WEATHER_REFRESH_MS = 300000; // 5 min
-    const GEO_REFRESH_MS = 60000;      // 1 min (updates as you move)
+    const GEO_REFRESH_MS = 60000;      // 1 min
 
-    // Fade timing (ONLY affects the transition)
+    // Location fade timing
     const FADE_OUT_MS = 260;
     const FADE_IN_DELAY_MS = 40;
+
+    // Weather fade timing
+    const TEMP_FADE_OUT_MS = 240;
+    const TEMP_FADE_IN_DELAY_MS = 40;
 
     let lastTempF = "--";
     let lastCoords = null;
@@ -85,23 +112,20 @@
       return new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
     }
 
-    function updateMeta(){
-      setText("meta", `${lastTempF}°F • ${formatTime()}`);
+    // Update time every second (temp updates only when fetched)
+    function updateTime(){
+      setText("time", formatTime());
     }
-    setInterval(updateMeta, 1000);
+    setInterval(updateTime, 1000);
+    updateTime();
 
     function normalizeState(state){
-      // Keep full state names (Alabama, New York)
       return state || "";
     }
 
     function setPlaceVisibility(topLine){
       const topEl = document.getElementById("placeTop");
-      if (topLine && topLine.trim()){
-        topEl.style.display = "block";
-      } else {
-        topEl.style.display = "none";
-      }
+      topEl.style.display = (topLine && topLine.trim()) ? "block" : "none";
     }
 
     // Fade out -> swap text -> fade in (ONLY for location lines)
@@ -112,29 +136,19 @@
       const newTop = (topLine || "").trim();
       const newMain = (cityStateLine || "Location").trim();
 
-      // If nothing changed, do nothing
       if (newTop === lastTopText && newMain === lastMainText) return;
 
       lastTopText = newTop;
       lastMainText = newMain;
 
-      // Prepare visibility based on newTop
       setPlaceVisibility(newTop);
 
-      // Fade out both lines (top may be hidden but harmless)
       topEl.classList.add("fadingOut");
       mainEl.classList.add("fadingOut");
 
-      // After fade-out, swap text and fade back in
       setTimeout(() => {
-        if (newTop){
-          topEl.textContent = newTop;
-        } else {
-          topEl.textContent = "";
-        }
+        topEl.textContent = newTop || "";
         mainEl.textContent = newMain || "Location";
-
-        // Ensure correct visibility after setting text
         setPlaceVisibility(newTop);
 
         setTimeout(() => {
@@ -201,8 +215,21 @@
       const res = await fetch(url, { headers: { "Accept": "application/json" }});
       if (!res.ok) throw new Error("geocode failed");
       const data = await res.json();
-      const addr = data.address || {};
-      return pickBestPlaceLines(addr);
+      return pickBestPlaceLines(data.address || {});
+    }
+
+    function setTempSmooth(newTemp){
+      const tempEl = document.getElementById("temp");
+      const next = (newTemp === "--") ? "--°F" : `${newTemp}°F`;
+      const current = tempEl.textContent;
+
+      if (current === next) return;
+
+      tempEl.classList.add("tempOut");
+      setTimeout(() => {
+        tempEl.textContent = next;
+        setTimeout(() => tempEl.classList.remove("tempOut"), TEMP_FADE_IN_DELAY_MS);
+      }, TEMP_FADE_OUT_MS);
     }
 
     async function fetchWeather(lat, lon){
@@ -211,8 +238,10 @@
       if (!res.ok) throw new Error("weather failed");
       const data = await res.json();
       const t = Math.round(data.current_weather?.temperature);
-      if (Number.isFinite(t)) lastTempF = t;
-      updateMeta();
+      if (Number.isFinite(t)) {
+        lastTempF = t;
+        setTempSmooth(lastTempF);
+      }
     }
 
     async function refreshAll(lat, lon){
@@ -222,10 +251,10 @@
 
       lastCoords = {lat, lon};
 
-      // weather every time
-      fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; updateMeta(); });
+      // weather
+      fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; setTempSmooth("--"); });
 
-      // place only when moved enough
+      // place
       if (movedEnough){
         reverseGeocode(lat, lon)
           .then(({topLine, cityStateLine}) => setPlaceLinesSmooth(topLine, cityStateLine))
@@ -239,25 +268,17 @@
         return;
       }
 
-      const onPos = (pos) => {
-        const lat = pos.coords.latitude;
-        const lon = pos.coords.longitude;
-        refreshAll(lat, lon);
-      };
-
-      const onErr = () => {
-        setPlaceLinesSmooth("", "Enable Location");
-      };
+      const onPos = (pos) => refreshAll(pos.coords.latitude, pos.coords.longitude);
+      const onErr = () => setPlaceLinesSmooth("", "Enable Location");
 
       navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
       setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
     }
 
     // Kick off
-    updateMeta();
     startGeolocation();
 
-    // Refresh weather periodically even if not moving
+    // Weather refresh even if you don’t move
     setInterval(() => {
       if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
     }, WEATHER_REFRESH_MS);
