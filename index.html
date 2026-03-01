@@ -1,1 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Walk Overlay</title>
 
+  <style>
+    body{
+      margin:0;
+      background:transparent;
+      overflow:hidden;
+      font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+      color:#fff;
+    }
+    .overlay{
+      position:fixed;
+      right:4vw;
+      bottom:4vh;
+      text-align:right;
+      pointer-events:none;
+    }
+    .place{
+      font-size:2.9vh;        /* your current sizing */
+      font-weight:400;
+      letter-spacing:2px;
+      text-transform:uppercase;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+      line-height:1.15;
+    }
+    .meta{
+      margin-top:.25vh;
+      font-size:2.2vh;        /* your current sizing */
+      font-weight:300;
+      opacity:.9;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+
+      /* IMPORTANT: meta line never fades */
+      transition:none !important;
+      animation:none !important;
+    }
+
+    /* Location fade ONLY */
+    .fadeTarget{
+      opacity:1;
+      transition:opacity 550ms ease;
+      will-change:opacity;
+    }
+    .fadingOut{ opacity:0; }
+
+    /* Dot: slow breath (not blink) */
+    .dot{
+      display:inline-block;
+      margin:0 .6ch;
+      opacity:.25;
+      animation:dotBreath 4.8s ease-in-out infinite;
+      will-change:opacity;
+    }
+    @keyframes dotBreath{
+      0%   { opacity:.22; }
+      50%  { opacity:.85; }
+      100% { opacity:.22; }
+    }
+
+    /* Temp: fades ONLY when temp changes */
+    #tempText{
+      display:inline-block;
+      opacity:1;
+      transition:opacity 650ms ease;
+      will-change:opacity;
+    }
+    #tempText.tempOut{ opacity:0; }
+
+    /* Time: forced to NEVER pulse */
+    #timeText{
+      display:inline-block;
+      opacity:1 !important;
+      transition:none !important;
+      animation:none !important;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="overlay">
+    <div class="place fadeTarget" id="placeTop" style="display:none;">Locating…</div>
+    <div class="place fadeTarget" id="place">Locating…</div>
+
+    <div class="meta">
+      <span id="tempText">--°F</span><span class="dot">•</span><span id="timeText">--:--:--</span>
+    </div>
+  </div>
+
+  <script>
+    // --- CONFIG ---
+    const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
+    const WEATHER_REFRESH_MS = 300000; // 5 min
+    const GEO_REFRESH_MS = 60000;      // 1 min
+    const FADE_OUT_MS = 260;
+    const FADE_IN_DELAY_MS = 40;
+
+    let lastTempF = "--";
+    let lastCoords = null;
+
+    let lastTopText = "";
+    let lastMainText = "";
+    let lastTempShown = ""; // string like "72°F"
+
+    function formatTime(){
+      return new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+    }
+
+    // Update ONLY the time text (no fades, no innerHTML)
+    function updateTimeOnly(){
+      document.getElementById("timeText").textContent = formatTime();
+    }
+    setInterval(updateTimeOnly, 1000);
+    updateTimeOnly();
+
+    function normalizeState(state){ return state || ""; }
+
+    function setPlaceVisibility(topLine){
+      const topEl = document.getElementById("placeTop");
+      topEl.style.display = (topLine && topLine.trim()) ? "block" : "none";
+    }
+
+    // Location: Fade out -> swap -> fade in
+    function setPlaceLinesSmooth(topLine, cityStateLine){
+      const topEl = document.getElementById("placeTop");
+      const mainEl = document.getElementById("place");
+
+      const newTop = (topLine || "").trim();
+      const newMain = (cityStateLine || "Location").trim();
+
+      if (newTop === lastTopText && newMain === lastMainText) return;
+      lastTopText = newTop;
+      lastMainText = newMain;
+
+      setPlaceVisibility(newTop);
+
+      topEl.classList.add("fadingOut");
+      mainEl.classList.add("fadingOut");
+
+      setTimeout(() => {
+        topEl.textContent = newTop || "";
+        mainEl.textContent = newMain || "Location";
+        setPlaceVisibility(newTop);
+
+        setTimeout(() => {
+          topEl.classList.remove("fadingOut");
+          mainEl.classList.remove("fadingOut");
+        }, FADE_IN_DELAY_MS);
+
+      }, FADE_OUT_MS);
+    }
+
+    // Temp: Fade ONLY when temp value changes
+    function setTempSmooth(tempF){
+      const tempEl = document.getElementById("tempText");
+      const next = (tempF === "--") ? "--°F" : `${tempF}°F`;
+
+      if (next === lastTempShown) return;
+      lastTempShown = next;
+
+      tempEl.classList.add("tempOut");
+      setTimeout(() => {
+        tempEl.textContent = next;
+        setTimeout(() => tempEl.classList.remove("tempOut"), FADE_IN_DELAY_MS);
+      }, FADE_OUT_MS);
+    }
+
+    function pickBestPlaceLines(addr){
+      const feature =
+        addr.national_park || addr.park || addr.protected_area || addr.nature_reserve ||
+        addr.attraction || addr.leisure || addr.tourism || addr.natural ||
+        addr.museum || addr.zoo || addr.aerodrome || "";
+
+      const neighborhood = addr.neighbourhood || addr.neighborhood || addr.quarter || "";
+      const district = addr.suburb || addr.city_district || addr.borough || addr.district || "";
+      const city = addr.city || addr.town || addr.village || addr.hamlet || "";
+      const state = normalizeState(addr.state || addr.region || "");
+      const country = addr.country || "";
+
+      const topLine = feature || neighborhood || district || "";
+
+      let cityState = "";
+      if (city && state) cityState = `${city}, ${state}`;
+      else if (city) cityState = city;
+      else if (state && country) cityState = `${state}, ${country}`;
+      else cityState = country || "Your Location";
+
+      const topClean = (topLine && (topLine === city || topLine === state)) ? "" : topLine;
+      return { topLine: topClean, cityStateLine: cityState };
+    }
+
+    async function reverseGeocode(lat, lon){
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+      const res = await fetch(url, { headers: { "Accept": "application/json" }});
+      if (!res.ok) throw new Error("geocode failed");
+      const data = await res.json();
+      return pickBestPlaceLines(data.address || {});
+    }
+
+    async function fetchWeather(lat, lon){
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("weather failed");
+      const data = await res.json();
+      const t = Math.round(data.current_weather?.temperature);
+      if (Number.isFinite(t)) lastTempF = t;
+      setTempSmooth(lastTempF);
+    }
+
+    async function refreshAll(lat, lon){
+      const movedEnough = !lastCoords
+        || Math.abs(lat - lastCoords.lat) > 0.002
+        || Math.abs(lon - lastCoords.lon) > 0.002;
+
+      lastCoords = {lat, lon};
+
+      fetchWeather(lat, lon).catch(()=> setTempSmooth("--"));
+
+      if (movedEnough){
+        reverseGeocode(lat, lon)
+          .then(({topLine, cityStateLine}) => setPlaceLinesSmooth(topLine, cityStateLine))
+          .catch(() => setPlaceLinesSmooth("", "Location"));
+      }
+    }
+
+    function startGeolocation(){
+      if (!navigator.geolocation){
+        setPlaceLinesSmooth("", "No GPS");
+        return;
+      }
+
+      const onPos = (pos) => refreshAll(pos.coords.latitude, pos.coords.longitude);
+      const onErr = () => setPlaceLinesSmooth("", "Enable Location");
+
+      navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
+      setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
+    }
+
+    // Kick off
+    setTempSmooth(lastTempF);
+    startGeolocation();
+
+    setInterval(() => {
+      if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
+    }, WEATHER_REFRESH_MS);
+  </script>
+</body>
+</html>
