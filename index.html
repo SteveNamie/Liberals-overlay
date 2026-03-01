@@ -1,256 +1,266 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Live Walk Overlay</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Walk Overlay</title>
 
-<style>
+  <style>
+    body{
+      margin:0;
+      background:transparent;
+      overflow:hidden;
+      font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
+      color:#fff;
+    }
+    .overlay{
+      position:fixed;
+      right:4vw;
+      bottom:4vh;
+      text-align:right;
+      pointer-events:none;
+    }
+    .place{
+      font-size:2.4vh;          /* NO SIZE CHANGE */
+      font-weight:400;
+      letter-spacing:2px;
+      text-transform:uppercase;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+      line-height:1.15;
+    }
+    .meta{
+      margin-top:.25vh;
+      font-size:1.6vh;          /* NO SIZE CHANGE */
+      font-weight:300;
+      opacity:.9;
+      text-shadow:0 2px 10px rgba(0,0,0,.7);
+      white-space:nowrap;
+    }
 
-body{
-margin:0;
-background:transparent;
-overflow:hidden;
-font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;
-color:#fff;
-}
-
-.overlay{
-position:fixed;
-right:4vw;
-bottom:4vh;
-text-align:right;
-pointer-events:none;
-}
-
-/* LOCATION */
-.place{
-font-size:19px;
-font-weight:400;
-letter-spacing:2px;
-text-transform:uppercase;
-text-shadow:0 2px 10px rgba(0,0,0,.7),0 0 2px rgba(0,0,0,.9);
-white-space:nowrap;
-line-height:1.15;
-opacity:0;
-transition:opacity 1.2s ease;
-}
-
-/* TEMP + TIME */
-.meta{
-margin-top:.25vh;
-font-size:16px;
-font-weight:300;
-opacity:.9;
-text-shadow:0 2px 10px rgba(0,0,0,.7),0 0 2px rgba(0,0,0,.9);
-white-space:nowrap;
-}
-
-/* Slow breathing dot */
-.dot{
-padding:0 6px;
-animation:dotfade 4s ease-in-out infinite;
-}
-
-@keyframes dotfade{
-0%{opacity:.25}
-50%{opacity:1}
-100%{opacity:.25}
-}
-
-</style>
+    /* --- ONLY CHANGE: smooth fade for location lines when they update --- */
+    .fadeTarget{
+      opacity:1;
+      transition:opacity 550ms ease;
+      will-change:opacity;
+    }
+    .fadingOut{
+      opacity:0;
+    }
+  </style>
 </head>
 
 <body>
+  <div class="overlay">
+    <!-- Line 1: landmark/park/neighborhood (only shown when available) -->
+    <div class="place fadeTarget" id="placeTop" style="display:none;">Locating…</div>
 
-<div class="overlay">
+    <!-- Line 2: city, state (always shown once we can resolve) -->
+    <div class="place fadeTarget" id="place">Locating…</div>
 
-<div class="place" id="placeTop"></div>
-<div class="place" id="place"></div>
+    <!-- Line 3: temp + time -->
+    <div class="meta" id="meta">--°F • --:--:--</div>
+  </div>
 
-<div class="meta">
-<span id="temp">--°F</span>
-<span class="dot">•</span>
-<span id="time">--:--:--</span>
-</div>
+  <script>
+    // --- CONFIG (UNCHANGED) ---
+    const GEO_OPTIONS = { enableHighAccuracy: true, maximumAge: 15000, timeout: 15000 };
+    const WEATHER_REFRESH_MS = 300000; // 5 min
+    const GEO_REFRESH_MS = 60000;      // 1 min (updates as you move)
 
-</div>
+    // Fade timing (ONLY affects the transition)
+    const FADE_OUT_MS = 260;
+    const FADE_IN_DELAY_MS = 40;
 
-<script>
+    let lastTempF = "--";
+    let lastCoords = null;
 
-const GEO_OPTIONS={enableHighAccuracy:true,maximumAge:15000,timeout:15000}
-const WEATHER_REFRESH_MS=300000
-const GEO_REFRESH_MS=60000
+    // Track last displayed text to avoid unnecessary fades
+    let lastTopText = "";
+    let lastMainText = "";
 
-let lastCoords=null
-let lastTemp="--"
+    function setText(id, txt){ document.getElementById(id).textContent = txt; }
 
-function updateClock(){
-document.getElementById("time").textContent=
-new Date().toLocaleTimeString([],{
-hour:'numeric',
-minute:'2-digit',
-second:'2-digit'
-})
-}
+    function formatTime(){
+      return new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit', second:'2-digit'});
+    }
 
-setInterval(updateClock,1000)
+    function updateMeta(){
+      setText("meta", `${lastTempF}°F • ${formatTime()}`);
+    }
+    setInterval(updateMeta, 1000);
 
-function fadeText(id,text){
+    function normalizeState(state){
+      // Keep full state names (Alabama, New York)
+      return state || "";
+    }
 
-const el=document.getElementById(id)
+    function setPlaceVisibility(topLine){
+      const topEl = document.getElementById("placeTop");
+      if (topLine && topLine.trim()){
+        topEl.style.display = "block";
+      } else {
+        topEl.style.display = "none";
+      }
+    }
 
-el.style.opacity=0
+    // Fade out -> swap text -> fade in (ONLY for location lines)
+    function setPlaceLinesSmooth(topLine, cityStateLine){
+      const topEl = document.getElementById("placeTop");
+      const mainEl = document.getElementById("place");
 
-setTimeout(()=>{
-el.textContent=text
-el.style.opacity=1
-},250)
+      const newTop = (topLine || "").trim();
+      const newMain = (cityStateLine || "Location").trim();
 
-}
+      // If nothing changed, do nothing
+      if (newTop === lastTopText && newMain === lastMainText) return;
 
-function normalizeState(state){
-return state||""
-}
+      lastTopText = newTop;
+      lastMainText = newMain;
 
-function pickBestPlace(addr){
+      // Prepare visibility based on newTop
+      setPlaceVisibility(newTop);
 
-const feature=
-addr.park||
-addr.national_park||
-addr.protected_area||
-addr.nature_reserve||
-addr.attraction||
-addr.tourism||
-addr.museum||
-addr.zoo||
-addr.aerodrome||
-""
+      // Fade out both lines (top may be hidden but harmless)
+      topEl.classList.add("fadingOut");
+      mainEl.classList.add("fadingOut");
 
-const neighborhood=
-addr.neighbourhood||
-addr.neighborhood||
-addr.quarter||
-addr.suburb||
-addr.city_district||
-addr.borough||
-addr.district||
-""
+      // After fade-out, swap text and fade back in
+      setTimeout(() => {
+        if (newTop){
+          topEl.textContent = newTop;
+        } else {
+          topEl.textContent = "";
+        }
+        mainEl.textContent = newMain || "Location";
 
-const city=
-addr.city||
-addr.town||
-addr.village||
-addr.hamlet||
-""
+        // Ensure correct visibility after setting text
+        setPlaceVisibility(newTop);
 
-const state=normalizeState(addr.state||addr.region||"")
+        setTimeout(() => {
+          topEl.classList.remove("fadingOut");
+          mainEl.classList.remove("fadingOut");
+        }, FADE_IN_DELAY_MS);
 
-let top=feature||neighborhood||""
+      }, FADE_OUT_MS);
+    }
 
-let bottom=""
+    function pickBestPlaceLines(addr){
+      const feature =
+        addr.national_park ||
+        addr.park ||
+        addr.protected_area ||
+        addr.nature_reserve ||
+        addr.attraction ||
+        addr.leisure ||
+        addr.tourism ||
+        addr.natural ||
+        addr.museum ||
+        addr.zoo ||
+        addr.aerodrome ||
+        "";
 
-if(city&&state)bottom=`${city}, ${state}`
-else if(city)bottom=city
-else if(state)bottom=state
-else bottom="Location"
+      const neighborhood =
+        addr.neighbourhood ||
+        addr.neighborhood ||
+        addr.quarter ||
+        "";
 
-if(top===city||top===state)top=""
+      const district =
+        addr.suburb ||
+        addr.city_district ||
+        addr.borough ||
+        addr.district ||
+        "";
 
-return{top,bottom}
+      const city =
+        addr.city ||
+        addr.town ||
+        addr.village ||
+        addr.hamlet ||
+        "";
 
-}
+      const state = normalizeState(addr.state || addr.region || "");
+      const country = addr.country || "";
 
-async function reverseGeocode(lat,lon){
+      const topLine = feature || neighborhood || district || "";
 
-try{
+      let cityState = "";
+      if (city && state) cityState = `${city}, ${state}`;
+      else if (city) cityState = city;
+      else if (state && country) cityState = `${state}, ${country}`;
+      else cityState = country || "Your Location";
 
-const res=await fetch(
-`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`
-)
+      const topClean = (topLine && (topLine === city || topLine === state)) ? "" : topLine;
 
-const data=await res.json()
+      return { topLine: topClean, cityStateLine: cityState };
+    }
 
-const place=pickBestPlace(data.address||{})
+    async function reverseGeocode(lat, lon){
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
+      const res = await fetch(url, { headers: { "Accept": "application/json" }});
+      if (!res.ok) throw new Error("geocode failed");
+      const data = await res.json();
+      const addr = data.address || {};
+      return pickBestPlaceLines(addr);
+    }
 
-if(place.top){
-fadeText("placeTop",place.top)
-document.getElementById("placeTop").style.display="block"
-}
-else{
-document.getElementById("placeTop").style.display="none"
-}
+    async function fetchWeather(lat, lon){
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("weather failed");
+      const data = await res.json();
+      const t = Math.round(data.current_weather?.temperature);
+      if (Number.isFinite(t)) lastTempF = t;
+      updateMeta();
+    }
 
-fadeText("place",place.bottom)
+    async function refreshAll(lat, lon){
+      const movedEnough = !lastCoords
+        || Math.abs(lat - lastCoords.lat) > 0.002
+        || Math.abs(lon - lastCoords.lon) > 0.002;
 
-}catch{}
+      lastCoords = {lat, lon};
 
-}
+      // weather every time
+      fetchWeather(lat, lon).catch(()=>{ lastTempF="--"; updateMeta(); });
 
-async function fetchWeather(lat,lon){
+      // place only when moved enough
+      if (movedEnough){
+        reverseGeocode(lat, lon)
+          .then(({topLine, cityStateLine}) => setPlaceLinesSmooth(topLine, cityStateLine))
+          .catch(() => setPlaceLinesSmooth("", "Location"));
+      }
+    }
 
-try{
+    function startGeolocation(){
+      if (!navigator.geolocation){
+        setPlaceLinesSmooth("", "No GPS");
+        return;
+      }
 
-const res=await fetch(
-`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&temperature_unit=fahrenheit`
-)
+      const onPos = (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        refreshAll(lat, lon);
+      };
 
-const data=await res.json()
+      const onErr = () => {
+        setPlaceLinesSmooth("", "Enable Location");
+      };
 
-const t=Math.round(data.current_weather?.temperature)
+      navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS);
+      setInterval(() => navigator.geolocation.getCurrentPosition(onPos, onErr, GEO_OPTIONS), GEO_REFRESH_MS);
+    }
 
-if(Number.isFinite(t)){
-lastTemp=t
-document.getElementById("temp").textContent=`${t}°F`
-}
+    // Kick off
+    updateMeta();
+    startGeolocation();
 
-}catch{}
-
-}
-
-async function refreshAll(lat,lon){
-
-const moved=
-!lastCoords||
-Math.abs(lat-lastCoords.lat)>.002||
-Math.abs(lon-lastCoords.lon)>.002
-
-lastCoords={lat,lon}
-
-fetchWeather(lat,lon)
-
-if(moved){
-reverseGeocode(lat,lon)
-}
-
-}
-
-function startGPS(){
-
-if(!navigator.geolocation){
-fadeText("place","Enable Location")
-return
-}
-
-const onPos=(pos)=>{
-const lat=pos.coords.latitude
-const lon=pos.coords.longitude
-refreshAll(lat,lon)
-}
-
-navigator.geolocation.getCurrentPosition(onPos)
-setInterval(()=>navigator.geolocation.getCurrentPosition(onPos),GEO_REFRESH_MS)
-
-}
-
-updateClock()
-startGPS()
-
-setInterval(()=>{
-if(lastCoords)fetchWeather(lastCoords.lat,lastCoords.lon)
-},WEATHER_REFRESH_MS)
-
-</script>
-
+    // Refresh weather periodically even if not moving
+    setInterval(() => {
+      if (lastCoords) fetchWeather(lastCoords.lat, lastCoords.lon).catch(()=>{});
+    }, WEATHER_REFRESH_MS);
+  </script>
 </body>
 </html>
